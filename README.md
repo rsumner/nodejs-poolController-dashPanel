@@ -101,4 +101,86 @@ Legacy variables `POOL_HTTP_IP` and `POOL_HTTP_PORT` are still honored.
 
 For production hardenings consider: enabling HTTPS, adding reverse proxy headers, mounting persistent volumes, and restricting exposed ports. Ensure ownership of the mounted `config.json` permits writes by the container user (UID 1000 in the official image); otherwise configuration changes will be disabled.
 
+## Remote access
+As configured in Quick Start above, the dashboard is only suitable to be used on your local network.  To secure the website for accessing remotely on the internet you will need to use a [reverse proxy](https://en.wikipedia.org/wiki/Reverse_proxy) that is conigured to use encryption and authentication.  There are several reverse proxies available, including [Nginx](https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/) and [Caddy](https://caddyserver.com/docs/quick-starts/reverse-proxy), but for this example [YARP](https://dotnet.github.io/yarp/) will be used.
 
+Let's Encrypt provides free SSL certificates that requires a domain name which can be obtained from [Duck DNS](https://www.duckdns.org/) after signup.  [WebAuthn](https://en.wikipedia.org/wiki/WebAuthn) enables strong authentication and is designed to enable passwordless login through hardware keys, biometrics (fingerprint/face), or mobile authenticators.  With these in place you can remotely access your dashboard in a secure manner over the internet.
+
+You will need to modify the docker compose file that was previously setup and confirmed running under http://localhost:5150 and add the following additional services (retaining njspc & njspc-dash) and new volume (to existing volumes). You will need to replace values for `DUCKDNS_DOMAIN` & `DUCKDNS_TOKEN` with the appropriate details from your Duck DNS account. 
+
+```yaml
+services:
+  ddns:
+    image: docker.io/maksimstojkovic/duckdns:latest
+    container_name: ddns
+    environment:
+      - DUCKDNS_DOMAIN=example.duckdns.org
+      - DUCKDNS_TOKEN=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+      - DUCKDNS_DELAY=60
+    restart: unless-stopped
+  certs:
+    image: docker.io/maksimstojkovic/letsencrypt:latest
+    container_name: certs
+    environment:
+      - DUCKDNS_DOMAIN=example.duckdns.org
+      - DUCKDNS_TOKEN=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+      - LETSENCRYPT_WILDCARD=true
+    volumes:
+      - proxy-config:/etc/letsencrypt
+    restart: unless-stopped
+  proxy:
+    image: docker.io/mguinness/yarpwebauthn:latest
+    container_name: proxy
+    ports:
+      - 8443:8443
+    volumes:
+      - proxy-config:/app/config
+    restart: unless-stopped
+
+volumes:
+  proxy-config:
+```
+
+On the initial run you will need to edit the `customsettings.json` file located in the `proxy-config` volume with the following and replace `example.duckdns.org` with your domain.
+
+```json
+{
+  "Kestrel": {
+    "Certificates": {
+      "Default": {
+        "Path": "config/live/example.duckdns.org/fullchain.pem",
+        "KeyPath": "config/live/example.duckdns.org/privkey.pem"
+      }
+    }
+  },
+  "ReverseProxy": {
+    "Routes": {
+      "route1": {
+        "ClusterId": "cluster1",
+        "AuthorizationPolicy": "default",
+        "Match": {
+          "Hosts": [ "njspc.example.duckdns.org" ],
+          "Path": "{**catch-all}"
+        }
+      }
+    },
+    "Clusters": {
+      "cluster1": {
+        "Destinations": {
+          "destination1": {
+            "Address": "http://njspc-dash:5150/"
+          }
+        }
+      }
+    }
+  },
+  "Hosts": {
+    "njspc.example.duckdns.org": {
+    }
+  }
+}
+```
+
+Once running, the proxy will be available on TCP port 8443. Typically you would configure your home router to setup a [port forward](https://www.noip.com/support/knowledgebase/general-port-forwarding-guide) rule accepting TCP port 443 and forwarding to TCP port 8433 on the machine running the proxy. Then your website should be publicly (and securely) accessible at https://njspc.example.duckdns.org/ (substituting example with the custom domain name that you selected).
+
+You will then need to register your security key as described in https://github.com/mguinness/YarpWebAuthn#usage.  If you have any problems or questions, please create an issue at https://github.com/mguinness/YarpWebAuthn for further assistance.
